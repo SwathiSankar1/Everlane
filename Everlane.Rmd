@@ -1,0 +1,203 @@
+---
+title: 'Everlane'
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+geometry: margin = 2cm
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=6, fig.height=3) 
+```
+
+## Introduction
+Founded in 2010, Everlane is primarily an online based apparel company which promotes their transparent pricing strategy. To do this they breakdown pricing of raw material and transportation costs as well as their profit margins. Everlane is seen as one of the most innovative companies, with an ethical and environmental friendly supply chain system. Last year it launched its first store in New York and plans to expand to different locations.
+
+The goal of this analysis is to help Everlane create a customer targeting strategy with a data driven approach. In order for our model to be most effective, we have incorporated several models to observe random effects and the unobserved heterogeneity in our data. Below you can find our in depth analysis.
+
+## Brief EDA
+Before running our model, a full understanding of the data and Everlane customers themselves was needed. At a high level, the data itself contains information on 345 customers and 1,875 of their purchases. Additionally, the average spend per transaction is $93.38 and the average number of transactions per customer is 5.4.
+
+One interesting trend was how spend changed by promotion. Customers who had no promotion spent less on average ($77) as is evident by the right skewed histogram below. However, as promotional value increases customers average spend increases as well ($105, $126, and $152 for $15, $25, and $35 respectively).
+
+```{r echo=FALSE, message = FALSE, warning=FALSE}
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(plm)
+library(lme4)
+library(sqldf)
+library(tidyverse)
+library(broom)
+
+#file path for the everlane data
+#path <- 
+#load(path)
+load(choose.files())
+
+ggplot(everlane,aes(x=spend)) + 
+  geom_histogram(fill = "blue",color="black",alpha=0.5) + 
+  labs(x="Dollars Spent per Transaction",y="") +
+  facet_wrap(~promo)
+```
+
+Another trend that was investigated was the different purchase pattern between male and female customers. Generally, male customers spent about 14% more than females. As the promotional value increases, the average spend between males and females decreased. For example, at the highest promotion of $35, females spent at least 8% more than males, which shows that female customers are more sensitive to promotions.
+
+## Age & gender-based segmentation
+As discussed above, with different promotional amount, customers' spending showed different trends depending on their gender and age group. Our advice to the marketing team is to segment the customers by age and gender for each promotion amount. 
+
+Because of insufficient customer information for every combination of gender and individual age, we felt more comfortable grouping customers into five age 'bins'. Targeting strategy based on age group is more practical when customers' specific age and historic transaction information are unknown. We recommend Everlane to target the four audiences seen in the table below based on promotion amount: 
+
+```{r echo=FALSE}
+promotion_output <- data_frame(
+  `Promotion Value` = c("0","15","25","35"),
+  Gender = c("Male","Male","Male","Female"),
+  Age = c("18-28","18-28","38-48","58-64"),
+  Analysis = c("Average spend is 33% higher than females in this segment",
+               "Highest average spend which is 30% higher than females",
+               "Highest average spend and they spend 8% more than females",
+               "Female average spend is 20% more than males")
+)
+
+kable(promotion_output)
+```
+
+## Linear Mixed-Effects Model
+With Everlane's panel data, we built a model to study how age, gender and discount amount influence customers' spending. Since we wanted to estimate the marginal effect of time-invariant regressors (i.e. age and gender), we chose Linear Mixed-Effects Model to capture the random effects (same model as that in week 6 notes). That being said, due to insufficient data points from every possible customer (every individual age/gender) the model had the potential to overfit the data. These issues were not discussed in this analysis.
+
+```{r, warning=FALSE, message=FALSE, echo = FALSE, include=FALSE}
+reg_re = lmer(spend ~ age * promo + female * promo + 
+                (1 + promo|id), everlane)
+```
+
+## Predict future spending
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+# Get our unique customers
+newDat <- data.frame(unique(everlane[ ,c("id","age","female")]))
+
+# Assign promo value - baseline - no promotion
+baseline <- newDat
+baseline$promo <- 0
+
+# Assign promo value - mass-marketing strategies - $15 for everyone
+newDat0 <- newDat
+newDat0$promo <- 15
+
+# Assign promo value - targeting groups based on age and gender
+newDat1 <- newDat
+newDat1[ , 4] <- sqldf("SELECT CASE WHEN female = 1 AND age >=58 AND age < 64 THEN 35
+                      WHEN female = 0 AND age >= 38 AND age < 48 THEN 25
+                      WHEN female = 0 AND age >= 18 AND age < 28 THEN 15
+                      ELSE 0 END AS promo
+                      FROM newDat")
+
+# Assign promo value - individual level
+newDat2 <- newDat
+newDat2[ , 4] <- coef(reg_re)$id[1]
+newDat2[ , 5] <- coef(reg_re)$id[3]
+colnames(newDat2)[4:5] <- c("intercept","promo_coeff")
+newDat2[ , 6] <- sqldf("SELECT CASE 
+                       WHEN promo_coeff >= 1.2 THEN 35
+                       WHEN promo_coeff < 1.2 AND promo_coeff >= 1 THEN 25
+                       WHEN promo_coeff < 1 AND promo_coeff >= 0.8 THEN 15
+                       ELSE 0 END AS promo
+                       FROM newDat2")
+
+# Calculate promotion costs for each type of marketing plan
+cost0 <- sum(newDat0$promo)
+cost1 <- sum(newDat1$promo)
+cost2 <- sum(newDat2$promo)
+
+# Predict future spending - baseline - no promotion
+beta <- fixef(reg_re)
+
+baseline$intercept <- 1
+baseline$age_promo <- baseline$age * baseline$promo
+baseline$promo_female <- baseline$promo * baseline$female
+baseline <- baseline[,c(5,2,4,3,6,7)]
+
+sum_baseline <- 0
+for (i in 1:length(baseline$intercept)) {
+  sum_baseline <- sum_baseline + (as.numeric(baseline[i, ]) %*% beta)
+}
+sum_baseline <- round(sum_baseline)
+
+# Predict future spending - mass-marketing strategies - $15 for everyone
+newDat0$intercept <- 1
+newDat0$age_promo <- newDat0$age * newDat0$promo
+newDat0$promo_female <- newDat0$promo * newDat0$female
+newDat0 <- newDat0[,c(5,2,4,3,6,7)]
+
+sum_mass <- 0
+for (i in 1:length(newDat0$intercept)) {
+  sum_mass <- sum_mass + (as.numeric(newDat0[i, ]) %*% beta)
+}
+sum_mass <- round(sum_mass)
+
+# Predict future spending - based on age and gender
+newDat1$intercept <- 1
+newDat1$age_promo <- newDat1$age * newDat1$promo
+newDat1$promo_female <- newDat1$promo * newDat1$female
+newDat1 <- newDat1[,c(5,2,4,3,6,7)]
+
+sum_group <- 0
+for (i in 1:length(newDat1$intercept)) {
+  sum_group <- sum_group + (as.numeric(newDat1[i, ]) %*% beta)
+}
+sum_group <- round(sum_group)
+
+# Predict future spending - individual level
+sum_individual <- round(sum(predict(reg_re,newDat2[ ,c(1,2,6,3)])))
+
+# Calculate COGS - Cost of goods sold
+COGS_base <- round(sum_baseline / 1.43)
+COGS0 <- round(sum_mass / 1.43)
+COGS1 <- round(sum_group / 1.43)
+COGS2 <- round(sum_individual / 1.43)
+
+# Calculate net profit
+np_base <- round(sum_baseline - COGS_base)
+np0 <- round(sum_mass - COGS0 - cost0)
+np1 <- round(sum_group - COGS1 - cost1)
+np2 <- round(sum_individual - COGS2 - cost2)
+             
+# Calculate gain from promotion
+gain_mass <- sum_mass - sum_baseline - cost0
+gain_group <- sum_group - sum_baseline - cost1
+gain_individual <- sum_individual - sum_baseline - cost2
+
+# Compare 3 types of marketing plan on costs, predicted revenue and gains/profits
+comparison <- data_frame(
+  `Strategy` = c('Baseline', 'Mass-marketing', 'Group level', 'Individual level'),
+  `Details` = c('Do nothing', 'Give everyone $15', 'See table above', 'Customize marketing by sensitivity level'),
+  `Revenue` = c(sum_baseline, sum_mass, sum_group, sum_individual),
+  `Cost of goods sold` = c(COGS_base, COGS0, COGS1, COGS2),
+  `Promotion cost` = c(0, cost0, cost1, cost2),
+  `Net profit` = c(np_base, np0, np1, np2),
+  `Gain from promotion` = c(0, gain_mass, gain_group, gain_individual)
+)
+kable(comparison, format = "markdown", align = 'llccccc')
+
+```
+
+Given the results from our models above, we made predictions on cost incurred and revenue generated in 4 different circumstances, assuming each customer would make 1 order in the future. We assumed that the general markup for a product is around 20-50% of the true cost of a product (Source: Everlane website). In our model, we decided to use 43% as our markup percentage in our calculations. 
+
+On the individual level, the promotional amount for each customer would be offered according to their sensitivity to promotion as shown below:
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+individual_promo <- data.frame(
+  `No promo` = c('<0.8', 'No promo'),
+  `Promo 1` = c('0.8-1', '$15'),
+  `Promo 2` = c('1-1.2', '$25'),
+  `Promo 3` = c('>1.2', '$35'),
+  row.names = c('promotion coefficient', 'promotion amount')
+)
+
+kable(individual_promo, col.names = NULL)
+```
+
+## Conclusion
+In our analysis, two strategies were taken to segment and target customers. The first was based on age and gender. 5 bins were created for each of the four promotional levels. The top performing segments for each level were selected as the targeted segment. The second strategy used a linear mixed-effects model. It drilled down to more detailed level with information of customers' age, gender and past transactions. The model estimated promotion coefficient for each individual, revealing the customer's sensitivity to promotion. Sensitivity was then used to assign a promotion amount for each customer. After comparing our two targeting strategies as well as a baseline of no promotions and a mass $15 promotion for everyone, we determined that the individual level marketing strategy was the most effective. It raised sales by $6,648 over the baseline and $1,374 over the next most profitable strategy, i.e. mass-marketing.
+
+
